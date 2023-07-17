@@ -165,3 +165,136 @@ Netty实现一个服务器
 
     }
 ```
+
+在Netty中，一个`Channel`会被注册到一个`EventLoopGroup`中的一个`EventLoop`上。`EventLoopGroup`是用于管理`Channel`的线程池，而`EventLoop`是负责处理`Channel`上的事件的执行器。
+
+一个`Channel`可以有多个`ChannelHandler`，这些`ChannelHandler`被添加到`ChannelPipeline`中，构成了处理器链。`ChannelPipeline`是一个处理器链，它负责处理`Channel`上的事件和数据流。当有事件在`Channel`上触发时，`ChannelPipeline`会按顺序调用每个`ChannelHandler`的相应方法来处理事件或数据。
+
+每个`ChannelHandler`可以根据需要进行读取、写入、转换、解码、编码、验证等操作，并将处理结果传递给下一个`ChannelHandler`。通过将多个`ChannelHandler`组合在一起，可以实现复杂的数据处理逻辑。
+
+因此，您的理解是一个`Channel`会被注册到一个事件循环组（`EventLoopGroup`）中，然后该`Channel`会有多个`ChannelHandler`组成的处理器链（`ChannelPipeline`）来监听和处理事件和数据。每个`ChannelHandler`负责特定的任务，并可以通过`ChannelHandlerContext`与`Channel`进行交互和操作。
+
+
+
+channel:
+
+在学习NIO时，我们就已经接触到Channel了，我们可以通过通道来进行数据的传输，并且通道支持双向传输。
+
+而在Netty中，也有对应的Channel类型：
+
+```java
+public interface Channel extends AttributeMap, ChannelOutboundInvoker, Comparable<Channel> {
+    ChannelId id();   //通道ID
+    EventLoop eventLoop();   //获取此通道所属的EventLoop，因为一个Channel在它的生命周期内只能注册到一个EventLoop中
+    Channel parent();   //Channel是具有层级关系的，这里是返回父Channel
+    ChannelConfig config();
+    boolean isOpen();   //通道当前的相关状态
+    boolean isRegistered();
+    boolean isActive();
+    ChannelMetadata metadata();   //通道相关信息
+    SocketAddress localAddress(); 
+    SocketAddress remoteAddress();
+    ChannelFuture closeFuture();  //关闭通道，但是会用到ChannelFuture，后面说
+    boolean isWritable();
+    long bytesBeforeUnwritable();
+    long bytesBeforeWritable();
+    Unsafe unsafe();
+    ChannelPipeline pipeline();   //流水线，之后也会说
+    ByteBufAllocator alloc();   //可以直接从Channel拿到ByteBufAllocator的实例，来分配ByteBuf
+    Channel read();
+    Channel flush();   //刷新，基操
+}
+```
+
+
+
+
+
+channelHandler的生命周期:
+
+```java
+public class TestChannelHandler extends ChannelInboundHandlerAdapter {
+
+    public void channelRegistered(ChannelHandlerContext ctx) throws Exception {
+        System.out.println("channelRegistered");
+    }
+
+    public void channelUnregistered(ChannelHandlerContext ctx) throws Exception {
+        System.out.println("channelUnregistered");
+    }
+
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        System.out.println("channelActive");
+    }
+
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        System.out.println("channelInactive");
+    }
+
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        ByteBuf buf = (ByteBuf) msg;
+        System.out.println(Thread.currentThread().getName()+" >> 接收到客户端发送的数据："+buf.toString(StandardCharsets.UTF_8));
+        //这次我们就直接使用ctx.alloc()来生成缓冲区
+        ByteBuf back = ctx.alloc().buffer();
+        back.writeCharSequence("已收到！", StandardCharsets.UTF_8);
+        ctx.writeAndFlush(back);
+        System.out.println("channelRead");
+    }
+
+    public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+        System.out.println("channelReadComplete");
+    }
+
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        System.out.println("userEventTriggered");
+    }
+
+    public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
+        System.out.println("channelWritabilityChanged");
+    }
+
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        System.out.println("exceptionCaught"+cause);
+    }
+}s
+```
+
+如果handler运行出现异常那么就会在他的exceptionCaught方法当中处理这个异常
+
+Channel	
+
+![image-20230718010523394](mdPic/Netty/image-20230718010523394.png)
+
+```javva
+ctx.fireChannelRead(msg)//将消息传递给下一个	Handler
+```
+
+处理器链，出站与入站的设置
+
+```
+.childHandler(new ChannelInitializer<SocketChannel>() {
+    @Override
+    protected void initChannel(SocketChannel socketChannel) throws Exception {
+        //获取流水线,一个流水线上面有很多的Handler
+        socketChannel.pipeline()//需要将出站的处理器放在前面
+                .addLast(new ChannelOutboundHandlerAdapter() {
+                    @Override
+                    public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+                        ByteBuf byteBuf = (ByteBuf) msg;
+                        System.out.println(Thread.currentThread().getName() + ">>写出的信息:" + byteBuf.toString(StandardCharsets.UTF_8));
+                        ctx.writeAndFlush(Unpooled.wrappedBuffer("已经收到消息了".getBytes()));
+                    }
+                })
+                .addLast(new ChannelInboundHandlerAdapter() {//添加一个handler,入栈
+                    @Override
+                    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {//ctx是上下文,msg默认是ByteBuf类
+                        ByteBuf byteBuf = (ByteBuf) msg;
+                        System.out.println(Thread.currentThread().getName() + ">>收到客户端传来的信息:" + byteBuf.toString(StandardCharsets.UTF_8));
+                        //通过上下文返回一个响应,返回一个数据
+                        ctx.writeAndFlush(Unpooled.wrappedBuffer("已经收到消息了".getBytes()));//使用该方法会从当前·的Handler往前找出站处理器，
+                    }
+                });
+    }
+});
+```
+
