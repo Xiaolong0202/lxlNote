@@ -298,3 +298,343 @@ ctx.fireChannelRead(msg)//将消息传递给下一个	Handler
 });
 ```
 
+EventLoop 
+
+![image-20230727223134647](mdPic/Netty/image-20230727223134647.png)
+
+添加流水线的时候可以指定eventloopGroup
+
+![image-20230727223731065](mdPic/Netty/image-20230727223731065.png)
+
+Netty编写客户端
+
+```java
+Bootstrap bootstrap = new Bootstrap();   //客户端也是使用Bootstrap来启动
+    bootstrap
+            .group(new NioEventLoopGroup())   //客户端就没那么麻烦了，直接一个EventLoop就行，用于处理发回来的数据
+            .channel(NioSocketChannel.class)   //客户端肯定就是使用SocketChannel了
+            .handler(new ChannelInitializer<SocketChannel>() {   //这里的数据处理方式和服务端是一样的
+                @Override
+                protected void initChannel(SocketChannel channel) throws Exception {
+                    channel.pipeline().addLast(new ChannelInboundHandlerAdapter(){   
+                        @Override
+                        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                            ByteBuf buf = (ByteBuf) msg;
+                            System.out.println(">> 接收到客户端发送的数据："+buf.toString(StandardCharsets.UTF_8));
+                        }
+                    });
+                }
+            });
+    Channel channel = bootstrap.connect("localhost", 8080).channel();  //连接后拿到对应的Channel对象
+      //注意上面连接操作是异步的，调用之后会继续往下走，下面我们就正式编写客户端的数据发送代码了
+    try(Scanner scanner = new Scanner(System.in)){    //还是和之前一样，扫了就发
+        while (true) {
+            System.out.println("<< 请输入要发送给服务端的内容：");
+            String text = scanner.nextLine();
+            if(text.isEmpty()) continue;
+            channel.writeAndFlush(Unpooled.wrappedBuffer(text.getBytes()));  //通过Channel对象发送数据
+        }
+    }
+```
+
+## ChannelFuture
+
+我们接着来看ChannelFuture，前面我们提到，Netty中Channel的相关操作都是异步进行的，并不是在当前线程同步执行，我们不能立即得到执行结果，如果需要得到结果，那么我们就必须要利用到Future。
+
+我们先来看看ChannelFutuer接口怎么定义的：
+
+```java
+public interface ChannelFuture extends Future<Void> {
+    Channel channel();    //我们可以直接获取此任务的Channel
+    ChannelFuture addListener(GenericFutureListener<? extends Future<? super Void>> var1);  //当任务完成时，会直接执行GenericFutureListener的任务，注意执行的位置也是在EventLoop中
+    ChannelFuture addListeners(GenericFutureListener<? extends Future<? super Void>>... var1);
+    ChannelFuture removeListener(GenericFutureListener<? extends Future<? super Void>> var1);
+    ChannelFuture removeListeners(GenericFutureListener<? extends Future<? super Void>>... var1);
+    ChannelFuture sync() throws InterruptedException;   //在当前线程同步等待异步任务完成，任务失败会抛出异常
+    ChannelFuture syncUninterruptibly();   //同上，但是无法响应中断
+    ChannelFuture await() throws InterruptedException;  //同上，但是任务中断不会抛出异常，需要手动判断
+    ChannelFuture awaitUninterruptibly();    //不用我说了吧？
+    boolean isVoid();   //返回类型是否为void
+}
+```
+
+此接口是继承自Netty中的Future接口的（不是JDK的那个）：
+
+```java
+public interface Future<V> extends java.util.concurrent.Future<V> {   //再往上才是JDK的Future
+    boolean isSuccess();    //用于判断任务是否执行成功的
+    boolean isCancellable();
+    Throwable cause();    //获取导致任务失败的异常
+    
+      ...
+    
+    V getNow();  //立即获取结果，如果还未产生结果，得到null，不过ChannelFuture定义V为Void，就算完成了获取也是null
+    boolean cancel(boolean var1);    //取消任务
+}
+复制代码
+```
+
+Channel的很多操作都是异步完成的，直接返回一个ChannelFuture，比如Channel的write操作，返回的就是一个ChannelFuture对象：
+
+```java
+//通过上下文返回一个响应,返回一个数据
+                                        ChannelFuture channelFuture = ctx.writeAndFlush(Unpooled.wrappedBuffer("已经收到消息了".getBytes()));
+//使用该方法会从当前·的Handler往前找出栈处理器，
+                                        System.out.println("任务完成状态"+channelFuture.isDone());
+```
+
+绑定事件
+
+```
+ChannelFuture channelFuture = serverBootstrap.bind(8080);
+channelFuture.addListener(new ChannelFutureListener() {
+    @Override
+    public void operationComplete(ChannelFuture channelFuture) throws Exception {
+        System.out.println("finishing!!1");
+    }
+});
+```
+
+我们接着来看看Promise接口，它支持手动设定成功和失败的结果：
+
+```java
+//此接口也是继承自Netty中的Future接口
+public interface Promise<V> extends Future<V> {
+    Promise<V> setSuccess(V var1);    //手动设定成功
+    boolean trySuccess(V var1);
+    Promise<V> setFailure(Throwable var1);  //手动设定失败
+    boolean tryFailure(Throwable var1);
+    boolean setUncancellable();
+        //这些就和之前的Future是一样的了
+    Promise<V> addListener(GenericFutureListener<? extends Future<? super V>> var1);
+    Promise<V> addListeners(GenericFutureListener<? extends Future<? super V>>... var1);
+    Promise<V> removeListener(GenericFutureListener<? extends Future<? super V>> var1);
+    Promise<V> removeListeners(GenericFutureListener<? extends Future<? super V>>... var1);
+    Promise<V> await() throws InterruptedException;
+    Promise<V> awaitUninterruptibly();
+    Promise<V> sync() throws InterruptedException;
+    Promise<V> syncUninterruptibly();
+}
+复制代码
+```
+
+比如我们来测试一下：
+
+```java
+public static void main(String[] args) throws ExecutionException, InterruptedException {
+    Promise<String> promise = new DefaultPromise<>(new DefaultEventLoop());
+    System.out.println(promise.isSuccess());    //在一开始肯定不是成功的
+    promise.setSuccess("lbwnb");    //设定成功
+    System.out.println(promise.isSuccess());   //再次获取，可以发现确实成功了
+    System.out.println(promise.get());    //获取结果，就是我们刚刚给进去的
+}
+```
+
+可以看到我们可以手动指定成功状态，包括ChannelOutboundInvoker中的一些基本操作，都是支持ChannelPromise的：
+
+```java
+.addLast(new ChannelInboundHandlerAdapter(){
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        ByteBuf buf = (ByteBuf) msg;
+        String text = buf.toString(StandardCharsets.UTF_8);
+        System.out.println("接收到客户端发送的数据："+text);
+        ChannelPromise promise = new DefaultChannelPromise(channel);
+        System.out.println(promise.isSuccess());
+        ctx.writeAndFlush(Unpooled.wrappedBuffer("已收到！".getBytes()), promise);
+        promise.sync();  //同步等待一下
+        System.out.println(promise.isSuccess());
+    }
+});
+```
+
+最后结果就是我们想要的了，当然我们也可以像Future那样添加监听器，当成功时自动通知：
+
+```java
+public static void main(String[] args) throws ExecutionException, InterruptedException {
+    Promise<String> promise = new DefaultPromise<>(new DefaultEventLoop()); 
+    promise.addListener(f -> System.out.println(promise.get()));   //注意是在上面的DefaultEventLoop执行的
+    System.out.println(promise.isSuccess());
+    promise.setSuccess("lbwnb");
+    System.out.println(promise.isSuccess());
+}
+```
+
+### 编码器和解码器
+
+前面我们已经了解了Netty的大部分基础内容，我们接着来看看Netty内置的一些编码器和解码器。
+
+在前面的学习中，我们的数据发送和接收都是需要以ByteBuf形式传输，但是这样是不是有点太不方便了，咱们能不能参考一下JavaWeb那种搞个Filter，在我们开始处理数据之前，过过滤一次，并在过滤的途中将数据转换成我们想要的类型，也可以将发出的数据进行转换，这就要用到编码解码器了。
+
+我们先来看看最简的，字符串，如果我们要直接在客户端或是服务端处理字符串，可以直接添加一个字符串解码器到我们的流水线中：
+
+```java
+@Override
+protected void initChannel(SocketChannel channel) {
+    channel.pipeline()
+            //解码器本质上也算是一种ChannelInboundHandlerAdapter，用于处理入站请求
+            .addLast(new StringDecoder())   //当客户端发送来的数据只是简单的字符串转换的ByteBuf时，我们直接使用内置的StringDecoder即可转换
+            .addLast(new ChannelInboundHandlerAdapter(){
+                @Override
+                public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                    //经过StringDecoder转换后，msg直接就是一个字符串，所以打印就行了
+                    System.out.println(msg);
+                }
+            });
+}
+```
+
+### 自定义编码器
+
+![image-20230728000631806](mdPic/Netty/image-20230728000631806.png)
+
+
+
+![image-20230728000552185](mdPic/Netty/image-20230728000552185.png)
+
+编码器、解码器
+
+```java
+ socketChannel.pipeline()//需要将出栈的处理器放在前面
+                                .addLast(new StringDecoder())
+                                .addLast(new ChannelInboundHandlerAdapter() {//添加一个handler,入栈
+                                    @Override
+                                    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {//ctx是上下文,msg默认是ByteBuf类
+                                        System.out.println(Thread.currentThread().getName() + ">>收到客户端传来的信息:" + msg);
+                                        //通过上下文返回一个响应,返回一个数据
+                                       ctx.channel().writeAndFlush("sadsadsa咋的萨达");//使用该方法会从当前·的Handler往前找出栈处理器，
+                                    }
+                                })
+                                .addLast(new StringEncoder());
+```
+
+编解码器，既可以处理出站，也可以处理入站
+
+![image-20230728004223424](mdPic/Netty/image-20230728004223424.png)
+
+使用解码器与编码器处理粘包问题:
+
+我们在一开始提到的粘包/拆包问题，也可以使用一个解码器解决：
+
+```java
+channel.pipeline()
+        .addLast(new FixedLengthFrameDecoder(10))  
+        //第一种解决方案，使用定长数据包，每个数据包都要是指定长度
+              ...
+复制代码
+channel.pipeline()
+        .addLast(new DelimiterBasedFrameDecoder(1024, Unpooled.wrappedBuffer("!".getBytes())))
+        //第二种，就是指定一个特定的分隔符，比如我们这里以感叹号为分隔符
+              //在收到分隔符之前的所有数据，都作为同一个数据包的内容
+复制代码
+channel.pipeline()
+        .addLast(new LengthFieldBasedFrameDecoder(1024, 0, 4))
+        //第三种方案，就是在头部添加长度信息，来确定当前发送的数据包具体长度是多少
+        //offset是从哪里开始，length是长度信息占多少字节，这里是从0开始读4个字节表示数据包长度
+        .addLast(new StringDecoder())
+复制代码
+channel.pipeline()
+        .addLast(new StringDecoder())
+        .addLast(new ChannelInboundHandlerAdapter(){
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                System.out.println(">> 接收到客户端发送的数据：" + msg);
+            }
+        })
+        .addLast(new LengthFieldPrepender(4))   //客户端在发送时也需要将长度拼到前面去
+        .addLast(new StringEncoder());
+```
+
+### 使用Netty解析Http请求
+
+##### HttpObjectAggregator的作用：
+
+在 Netty 中，`HttpObjectAggregator` 是一个用于处理 HTTP 消息的处理器（handler）。它的主要作用是将 HTTP 消息的多个部分聚合成完整的 `FullHttpRequest` 或 `FullHttpResponse`，以便后续的处理器能够更方便地处理完整的请求或响应。
+
+HTTP 消息通常由多个部分组成，特别是在处理 POST 请求时，请求的内容可能被分成多个片段（chunks）发送。
+
+```java
+serverBootstrap
+                .group(bossGroup, workGroup)//指定事件循环组
+                .channel(NioServerSocketChannel.class)//指定类型
+                .childHandler(new ChannelInitializer<SocketChannel>() {
+                    @Override
+                    protected void initChannel(SocketChannel socketChannel) throws Exception {
+                        //获取流水线,一个流水线上面有很多的Handler
+                        socketChannel.pipeline()//需要将出栈的处理器放在前面
+                                .addLast(new HttpRequestDecoder())
+                                .addLast(new HttpObjectAggregator(Integer.MAX_VALUE))  //搞一个聚合器，将内容聚合为一个FullHttpRequest，参数是最大内容长度
+                                .addLast(new ChannelInboundHandlerAdapter() {//添加一个handler,入栈
+                                    @Override
+                                    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {//ctx是上下文,msg默认是ByteBuf类
+                                        System.out.println("收到客户端的数据："+msg.getClass());  //看看是个啥类型
+                                        FullHttpRequest request = (FullHttpRequest) msg;
+                                        System.out.println("浏览器的请求路径为："+request.uri());
+                                        //收到浏览器请求后，我们需要给一个响应回去
+                                        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);  //HTTP版本为1.1，状态码就OK（200）即可
+                                        //直接向响应内容中写入数据
+                                        response.content().writeCharSequence("Hello World!", StandardCharsets.UTF_8);
+                                        ctx.channel().writeAndFlush(response);   //发送响应
+                                        ctx.channel().close();   //HTTP请求是一次性的，所以记得关闭
+                                    }
+                                })
+                                .addLast(new HttpResponseEncoder());
+                    }
+                });
+```
+
+## 日至打印Handler
+
+```
+.addLast(new LoggingHandler(LogLevel.INFO))
+```
+
+## 过滤ip的Handler
+
+```java
+.addLast(new RuleBasedIpFilter(new IpFilterRule() {//过滤掉IP
+    @Override
+    public boolean matches(InetSocketAddress inetSocketAddress) {
+        return inetSocketAddress.getHostName().equals("127.0.0.1");
+    }
+    @Override
+    public IpFilterRuleType ruleType() {
+        return IpFilterRuleType.REJECT;//拒绝127.0.0.1的访问
+    }
+}))
+```
+
+我们也可以对那些长期处于空闲的进行处理：
+
+```java
+channel.pipeline()
+        .addLast(new StringDecoder())
+        .addLast(new IdleStateHandler(10, 10, 0))  //IdleStateHandler能够侦测连接空闲状态
+        //第一个参数表示连接多少秒没有读操作时触发事件，第二个是写操作，第三个是读写操作都算，0表示禁用
+        //事件需要在ChannelInboundHandlerAdapter中进行监听处理
+        .addLast(new ChannelInboundHandlerAdapter(){
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                System.out.println("收到客户端数据："+msg);
+                ctx.channel().writeAndFlush("已收到！");
+            }
+
+            @Override
+            public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+                //没想到吧，这个方法原来是在这个时候用的
+                if(evt instanceof IdleStateEvent) {
+                    IdleStateEvent event = (IdleStateEvent) evt;
+                    if(event.state() == IdleState.WRITER_IDLE) {
+                        System.out.println("好久都没写了，看视频的你真的有认真在跟着敲吗");
+                    } else if(event.state() == IdleState.READER_IDLE) {
+                        System.out.println("已经很久很久没有读事件发生了，好寂寞");
+                    }
+                }
+            }
+        })
+        .addLast(new StringEncoder());
+```
+
+## Netty的启动的流程
+
+bootStrap类开启bind方法之后就开始启动了
