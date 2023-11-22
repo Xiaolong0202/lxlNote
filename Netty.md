@@ -638,3 +638,29 @@ channel.pipeline()
 ## Netty的启动的流程
 
 bootStrap类开启bind方法之后就开始启动了
+
+
+
+## **Netty中的核心组件**
+
+1.网络通信层
+
+BootStrap  客户端的启动并且负责去连接远程的Netty Server
+
+ServerBootStrap 负责服务端的监听，用于监听指定的一个端口
+
+Channel 是网络信的通道
+
+2.事件调度层
+
+EventLoopGroup  本质上是一个线程池,去接受IO请求，并分配线程去处理
+
+EventLoop  是线程池当中的一个具体的线程
+
+3.服务编排层
+
+ChannelPipline 负责处理channelHandler将多个channelHandler形成一个pipline
+
+ChannelHandler 是一个数据处理器，接受数据之后由数据去处理相应的事件
+
+ChannelHandlerContext 用于处理处理器之间的一个上下文信息的
