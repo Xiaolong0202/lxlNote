@@ -664,3 +664,211 @@ ChannelPipline 负责处理channelHandler将多个channelHandler形成一个pipl
 ChannelHandler 是一个数据处理器，接受数据之后由数据去处理相应的事件
 
 ChannelHandlerContext 用于处理处理器之间的一个上下文信息的
+
+## FileRegion实现零拷贝
+
+```java
+import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.*;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.codec.http.*;
+import io.netty.handler.stream.ChunkedFile;
+import io.netty.util.CharsetUtil;
+
+import java.io.File;
+import java.io.RandomAccessFile;
+
+public class FileClient {
+
+    public static void main(String[] args) throws Exception {
+        EventLoopGroup group = new NioEventLoopGroup();
+
+        try {
+            Bootstrap b = new Bootstrap();
+            b.group(group)
+                    .channel(NioSocketChannel.class)
+                    .handler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel ch) {
+                            ChannelPipeline p = ch.pipeline();
+                            p.addLast(new HttpClientCodec());
+                            p.addLast(new HttpObjectAggregator(65536));
+                            p.addLast(new ChunkedWriteHandler());
+                            p.addLast(new SimpleChannelInboundHandler<FullHttpResponse>() {
+                                @Override
+                                protected void channelRead0(ChannelHandlerContext ctx, FullHttpResponse msg) throws Exception {
+                                    // 处理服务器响应
+                                    if (msg.status().code() == HttpResponseStatus.OK.code()) {
+                                        System.out.println("File transferred successfully!");
+                                    } else {
+                                        System.err.println("File transfer failed: " + msg.status());
+                                    }
+                                }
+                            });
+                        }
+                    });
+
+            Channel ch = b.connect("127.0.0.1", 8080).sync().channel();
+
+            // 构建 HTTP 请求
+            HttpRequest request = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/");
+            HttpUtil.setContentLength(request, 0);
+
+            // 打开文件并创建 FileRegion
+            RandomAccessFile raf = new RandomAccessFile("path/to/your/local/file.txt", "r");
+            FileRegion region = new DefaultFileRegion(raf.getChannel(), 0, raf.length());
+
+            // 发送 HTTP 请求和 FileRegion
+            ch.writeAndFlush(request);
+            ch.writeAndFlush(region).addListener(ChannelFutureListener.CLOSE);
+
+            ch.closeFuture().sync();
+        } finally {
+            group.shutdownGracefully();
+        }
+    }
+}
+
+```
+
+
+
+```java
+import io.netty.bootstrap.ServerBootstrap;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelPipeline;
+import io.netty.channel.FileRegion;
+import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.codec.http.HttpServerCodec;
+import io.netty.handler.stream.ChunkedWriteHandler;
+
+import java.io.RandomAccessFile;
+
+public class FileServer {
+
+    public static void main(String[] args) throws Exception {
+        NioEventLoopGroup bossGroup = new NioEventLoopGroup();
+        NioEventLoopGroup workerGroup = new NioEventLoopGroup();
+
+        try {
+            ServerBootstrap b = new ServerBootstrap();
+            b.group(bossGroup, workerGroup)
+                    .channel(NioServerSocketChannel.class)
+                    .childHandler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel ch) {
+                            ChannelPipeline p = ch.pipeline();
+                            p.addLast(new HttpServerCodec());
+                            p.addLast(new HttpObjectAggregator(65536));
+                            p.addLast(new ChunkedWriteHandler());
+                            p.addLast(new SimpleChannelInboundHandler<Object>() {
+                                @Override
+                                protected void channelRead0(io.netty.channel.ChannelHandlerContext ctx, Object msg) throws Exception {
+                                    // 处理文件传输请求
+                                    if (msg instanceof FileRegion) {
+                                        FileRegion region = (FileRegion) msg;
+                                        RandomAccessFile raf = new RandomAccessFile("path/to/your/file.txt", "r");
+                                        region.transferTo(raf.getChannel(), 0, raf.length());
+                                        raf.close();
+                                    }
+                                }
+                            });
+                        }
+                    });
+
+            Channel ch = b.bind(8080).sync().channel();
+            ch.closeFuture().sync();
+        } finally {
+            bossGroup.shutdownGracefully();
+            workerGroup.shutdownGracefully();
+        }
+    }
+}
+
+```
+
+`Unpooled` 是 Netty 提供的一个工具类，用于创建各种类型的 `ByteBuf`。以下是使用 `Unpooled` 创建 `ByteBuf` 的几种常见方式：
+
+1. **创建一个堆内存的 `ByteBuf`：**
+
+   ```
+   javaCopy code
+   ByteBuf heapBuffer = Unpooled.buffer(1024);
+   ```
+
+   这种方式创建的 `ByteBuf` 使用 Java 堆内存，适用于大多数应用场景。
+
+2. **创建一个直接内存的 `ByteBuf`：**
+
+   ```
+   javaCopy code
+   ByteBuf directBuffer = Unpooled.directBuffer(1024);
+   ```
+
+   这种方式创建的 `ByteBuf` 使用直接内存，适用于需要避免将数据从用户空间复制到内核空间的高性能场景，例如进行网络 I/O 操作。
+
+3. **使用给定的字节数组创建 `ByteBuf`：**
+
+   ```
+   javaCopy codebyte[] byteArray = "Hello, ByteBuf!".getBytes();
+   ByteBuf wrappedBuffer = Unpooled.wrappedBuffer(byteArray);
+   ```
+
+   这种方式创建的 `ByteBuf` 是一个包装（wrapped）的 `ByteBuf`，它不会在内存中进行复制，而是直接引用给定的字节数组。请注意，对这种类型的 `ByteBuf` 的修改会影响原始字节数组。
+
+4. **使用给定的字符串创建 `ByteBuf`：**
+
+   ```
+   javaCopy codeString str = "Hello, ByteBuf!";
+   ByteBuf copiedBuffer = Unpooled.copiedBuffer(str, Charset.forName("UTF-8"));
+   ```
+
+   这种方式创建的 `ByteBuf` 是一个拷贝（copied）的 `ByteBuf`，它会在内存中创建一个新的字节数组，并将给定的字符串内容复制到该数组中。
+
+5. **创建一个组合 `ByteBuf`：**
+
+   ```
+   javaCopy codeByteBuf buffer1 = Unpooled.buffer(5).writeBytes("Hello".getBytes());
+   ByteBuf buffer2 = Unpooled.buffer(5).writeBytes(", ByteBuf!".getBytes());
+   
+   CompositeByteBuf compositeBuffer = Unpooled.wrappedBuffer(buffer1, buffer2);
+   ```
+
+   这种方式创建的 `ByteBuf` 是一个组合（composite）的 `ByteBuf`，它将多个 `ByteBuf` 合并为一个逻辑上的单一缓冲区。
+
+## Netty中的零拷贝技术：
+
+1.  DirectedBuf 直接使用堆外内存
+2. CompositedBuf 组合多个ByteBuf  实际上是逻辑上使用的多个ByteBuf,并没有进行复制
+3. Unpooled.wrapped是直接包裹，没有复制
+4. byteBuf slice 切分多个对象，实际上是公用的的一个ByteBuf
+5. FileRegion与RandomAccessFile相互组合共同实现了零拷贝，不需要进行内核态用户态的转换，使用transforTo的方法直接将接受到的文件传输，底层使用到的是Linux的sendfile
+
+## Netty线程模型:
+
+**单线程单Reactor模式**
+
+只有一个Reactor负责读写处理连接
+
+**单Reactor多线程模式**
+
+一个reactor中有多个线程，这个多个线程要同时进行连接、数据、handler的处理
+
+**主从reactor模型**
+
+两个reactor，parent负责连接的建立与，并负责将数据读取与处理交给childReactor
+
+## 解决TCP粘包
+
+1.按照换行符切割报文: LineBasedFrameDecoder
+2.按照自定义分隔符符号切割报文: DelimiterBasedFrameDecoderO
+3.按照固定长度切割报文: FixedLenghtFrameDecoder
+4.基于数据包长度切割报文: LengthFieldBasedFrameDecoder
