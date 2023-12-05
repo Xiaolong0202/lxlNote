@@ -2,6 +2,16 @@
 
 主从模式下对于 redis 主节点 与redis 从节点来说都是  非阻塞的，意思是在进行主从同步的时候，可以对主节点与从节点操作
 
+## redis执行一串原子性命令：
+
+通过EVAL 命令执行一串lua脚本可以保证原子性
+
+```lua
+ EVAL "local key = ARGV[1] local value = ARGV[2] redis.call('SET', key, value)" 1 mykey myvalue hhh
+```
+
+
+
 # 数据结构
 
 ![image-20231205183021141](mdPic/redis/image-20231205183021141.png)
@@ -45,6 +55,8 @@ intset还支持动态的改变编码
 
 ![image-20231205125544373](mdPic/redis/image-20231205125544373.png)
 
+**encoding字段中包含了数据的长度信息**
+
 ![image-20231205125931700](mdPic/redis/image-20231205125931700.png)
 
 ## QuickList
@@ -66,6 +78,8 @@ intset还支持动态的改变编码
 ![image-20231205134816655](mdPic/redis/image-20231205134816655.png)
 
 ## ListPack
+
+**encoding字段中包含了数据的长度信息**
 
 用于替代ZipList
 
@@ -235,3 +249,65 @@ Linux中是先io多路复用的三个函数
 
 ![image-20231205175100411](mdPic/redis/image-20231205175100411.png)
 
+## 单线程与多线程
+
+**Redis的“单线程”**
+
+Redis的“单线程”主要是指Redis的**网络IO** （redis 6.0之后变成了多线程）和**键值对读写**（一直是单线程）是由**一个线程**来完成的，Redis在处理客户端的请求时包括获取（socket读）、解析、执行、内容返回（socket写）等都由一个**顺序串行的主线程处理**（第一篇介绍过的那些原子的命令），这也是Redis对外提供键值存储服务的主要流程。
+
+**Redis的 多线程**
+
+比如持久化RDB、AOF、异步删除、集群同步数据等都是由额外的线程执行的，因此整个Redis可以看作是多线程的
+
+## redis执行事务(通过SessionCallBack接口)
+
+关系型数据库事务的作用是保证并发访问下数据的一致性，Redis事务有些不同，由于Redis是单线程的处理来自client的指令，所以Redis所有命令的执行都是原子性的，举一个简单的例子，单个Redis服务器下，并发地执行INCR命令，也不会返回相同的结果。
+
+  所以Redis事务的意义在于保证命令的批量顺序执行，并且事务执行期间，Redis不会执行来自client的其他请求。有一点需要注意的是，。如果有命令执行失败，还是会继续执行剩下的命令，因为Redis没有异常回滚。
+
+  对“Redis事务命令要么全部执行，要么全部不执行”这句事实的理解：如果有命令执行失败，并不是中断事务，而是继续执行剩下的指令，因为Redis不支持异常回滚。全部不执行的情况有 1.没有执行EXEC命令 2.WATCH的key发生改变 3.DISCARD命令放弃事务。本质上开启事务后，所有输入的命令都被缓存在一个队列中，一旦EXEC，队列里的指令被一条一条的执行。
+
+关于事务的API
+
+- MULTI  开启事务
+
+- EXEC  执行任务队列里所有命令，并结束事务
+
+- DISCARD   放弃事务，清空任务队列，全部不执行，并UNWATCH
+
+- WATCH key [key1]  MULTI执行之前，指定监控某key，如果key发生修改，放弃整个事务执行
+
+- UNWATCH  手动取消监控
+
+  Spring Data Redis 事务问题
+
+  RedisTemplate来操作Redis，关于事务操作的时候会有问题：
+
+  ```
+  redisTemplate.multi();
+  redisTemplate.opsForValue().increment("xxx",1);
+  redisTemplate.opsForValue().increment("ttt",1);
+  redisTemplate.exec();
+  ```
+
+   
+
+  
+  调用会报一个错误“No ongoing transaction. Did you forget to call multi? ”查了下，RedisTemplate操作事务不能理所当然地像原生API那么写，其实RedisTemplate的事务需要自己实现一个SessionCallBack来做事务，所以要这么写
+
+  [![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+  ```
+  SessionCallback sessionCallback = new SessionCallback() {
+      @Override
+      public Object execute(RedisOperations redisOperations) throws DataAccessException {
+          redisOperations.multi();
+          // TODO: 2017/11/20 命令1
+          // TODO: 2017/11/20 命令2
+          // TODO: 2017/11/20 命令3
+          return redisOperations.exec();
+      }
+  };
+  
+  redisTemplate.execute(sessionCallback);
+  ```
