@@ -4,6 +4,8 @@
 
 # 数据结构
 
+![image-20231205183021141](mdPic/redis/image-20231205183021141.png)
+
 ## 动态字符串SDS
 
 使用结构体维护一个字符串
@@ -63,6 +65,25 @@ intset还支持动态的改变编码
 
 ![image-20231205134816655](mdPic/redis/image-20231205134816655.png)
 
+## ListPack
+
+用于替代ZipList
+
+他去掉了zipList中的tailOffset
+
+并且entry中记录的是自己的长度,在 listpack 中，因为每个列表项**只记录自己的长度**，而不会像 ziplist 中的列表项那样，会记录前一项的长度。所以，当在 listpack 中新增或修改元素时，实际上只会涉及每个列表项自己的操作，而不会影响后续列表项的长度变化，这就避免了**连锁更新**。
+
+**element-tot-len**的特殊编码方式：element-tot-len 每个字节的最高位，是用来表示当前字节是否为 element-tot-len 的最后一个字节，这里存在两种情况，分别是：
+
+- 最高位为 1，表示 element-tot-len 还没有结束，当前字节的左边字节仍然表示 element-tot-len 的内容；
+- 最高位为 0，表示当前字节已经是 element-tot-len 最后一个字节了。而 element-tot-len 每个字节的低 7 位，则记录了实际的长度信息。
+
+这里需要注意的是，element-tot-len 每个字节的低 7 位采用了**大端模式存储**，也就是说，entry-len 的低位字节保存在内存高地址上。
+
+
+
+![image-20231205184036410](mdPic/redis/image-20231205184036410.png)
+
 ## RedisObject
 
 底层数据结构会被封装为RedisObjcet
@@ -82,6 +103,7 @@ intset还支持动态的改变编码
 ### LIST
 
 ```
+object encoding a
 lpush city a
 lpush city b
 lpush city c
@@ -212,3 +234,4 @@ Linux中是先io多路复用的三个函数
 ![image-20231205174940554](mdPic/redis/image-20231205174940554.png)
 
 ![image-20231205175100411](mdPic/redis/image-20231205175100411.png)
+
