@@ -155,8 +155,8 @@ smembers numset
 
 无序且保障数据的唯一性
 
-- 当数据都是**整数类型并且数据数量不超过set-max-intset-extries**的时候就会使用intSet 来实现， 有序且 唯一的整数数组，使用二分查找，并且使用intset的时候，他是有序的
-- 当存在不是整数的数据的时候就会使用Dict,使用hash表
+- 当数据都是**整数类型并且数据数量不超过set-max-intset-extries**的时候就会使用**intSet** 来实现， 有序且 唯一的整数数组，使用二分查找，并且使用intset的时候，他是有序的
+- 当存在不是整数的数据的时候就会使用**Dict**,使用hash表
 
 ### ZSET  (Sorted Set)
 
@@ -200,6 +200,10 @@ hvals map
 底层使用的是Dict,与zipList
 
 ![image-20231205161619103](mdPic/redis/image-20231205161619103.png)
+
+## Stream
+
+
 
 ## Linux五种不同的IO模型
 
