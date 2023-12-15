@@ -96,6 +96,8 @@ Adaptive Hash Index:自适应hash索引，用于优化对Buffer Pool数据的查
 
 ## 磁盘：
 
+表 段 区 页 行
+
 **File-Per-Table Tablespaces:**每个表的文件表空间包含单个InnoDB表的数据和索引，并存储在
 文件系统上的单个数据文件中。
 
@@ -185,9 +187,32 @@ select d fromt 2 where a="ni" and b=1;
 
 因为b字段因为类型不匹配导致索引失效了，但是通过下推优化其实是可以减少回表的次数的。
 
-## binlog 与 redolog的日志恢复的区别
+## redo log 和 binlog 有什么区别？
 
-binlog 和 redolog 是 MySQL 中两种不同的日志文件。binlog 是 MySQL 的 Server 层实现的，所有引擎都可以使用，而 redolog 是 InnoDB 引擎特有的。binlog 是逻辑日志，记录的是数据库操作语句，主要用于人工恢复数据。redo log 是物理日志，记录的是在某个表做了什么修改，用于 MySQL 异常重启时数据恢复，所以恢复速度比 binlog 更快。
+这两个日志有四个区别。
+
+*1、适用对象不同：*
+
+- binlog 是 MySQL 的 Server 层实现的日志，所有存储引擎都可以使用；
+- redo log 是 Innodb 存储引擎实现的日志；
+
+*2、文件格式不同：*
+
+- binlog 有 3 种格式类型，分别是 STATEMENT（默认格式）、ROW、 MIXED，区别如下：
+  - STATEMENT：每一条修改数据的 SQL 都会被记录到 binlog 中（相当于记录了逻辑操作，所以针对这种格式， binlog 可以称为逻辑日志），主从复制中 slave 端再根据 SQL 语句重现。但 STATEMENT 有动态函数的问题，比如你用了 uuid 或者 now 这些函数，你在主库上执行的结果并不是你在从库执行的结果，这种随时在变的函数会导致复制的数据不一致；
+  - ROW：记录行数据最终被修改成什么样了（这种格式的日志，就不能称为逻辑日志了），不会出现 STATEMENT 下动态函数的问题。但 ROW 的缺点是每行数据的变化结果都会被记录，比如执行批量 update 语句，更新多少行数据就会产生多少条记录，使 binlog 文件过大，而在 STATEMENT 格式下只会记录一个 update 语句而已；
+  - MIXED：包含了 STATEMENT 和 ROW 模式，它会根据不同的情况自动使用 ROW 模式和 STATEMENT 模式；
+- redo log 是物理日志，记录的是在某个数据页做了什么修改，比如对 XXX 表空间中的 YYY 数据页 ZZZ 偏移量的地方做了AAA 更新；
+
+*3、写入方式不同：*
+
+- binlog 是追加写，写满一个文件，就创建一个新的文件继续写，不会覆盖以前的日志，保存的是全量的日志。
+- redo log 是循环写，日志空间大小是固定，全部写满就从头开始，保存未被刷入磁盘的脏页日志。
+
+*4、用途不同：*
+
+- binlog 用于备份恢复、主从复制；
+- redo log 用于掉电等故障恢复。
 
 ## mysql 产生死锁
 
@@ -206,3 +231,133 @@ binlog 和 redolog 是 MySQL 中两种不同的日志文件。binlog 是 MySQL �
 3. 同一条sql产生死锁，就是同一条sql如果它需要对多个行加锁，同时进行操作的时候就可能导致死锁，两个线程分别先拿到了其中一个资源，并持有等待
 
 需要调整访问顺序，让线程以固定顺序执行
+
+## mysql 可重复读级别的幻读
+
+- 在一个事务当中虽然看不到别的事务的提交，比如另外一个事务插入了一个id = 25的行，你看不到因为你读的是 事务开始之前的数据，但是你却可以对这条数据进行增删改操作，并可以成功执行,MVCC只保证了读的时候的没有幻读，但是不能保证写的时候
+
+- 并且你在同一个事务中的时候，使用selct * from + 表名是使用的快照读，但是使用select * from+ 表名 for update 的时候就是当前读了
+
+## redolog为什么要先写
+
+redolog是追加写在之前日志idea基础上面追加，而更改数据是随机写要先找到数据的位置，所以redolog的写入操作更快所以
+
+## 索引跳跃扫描
+
+比如联合索引(a,b) 如果sql语句当中只有 b =  那么正常来说不符合最左前缀原则，但是在a的字段类型较少的情况下可以被优化成
+
+```mysql
+where  a = 1 and b =1
+union
+where a =  2 and b =1 
+```
+
+这样也可以用到索引，要求前面的字段区分度高，不如效率也会比较低
+
+## order by 排序的实现
+
+有索引的时候一般会走索引，索引保证了顺序，没有索引的时候会走file_sort 也就是将数据放入内存当中使用排序算法进行排序
+
+分为, **全字段排序、row_id排序**,字段过长会使用row_id 也就是排序的时候不带上数据，带上主键，但是这样的话需要进行回表
+
+如果file_sort的**缓冲区满了**就会去磁盘当中排序
+
+## 索引语句
+
+```mysql
+alter table user add index age_index(age); 添加索引
+ show index from user; 查看表中的索引
+  alter table user drop index user_age_index; 删除索引
+```
+
+
+
+# 优化
+
+## insert优化
+
+- 进行批量插入，也不要太多，太多的话可以多次分批插入
+- 手动控制事务，防止频繁的事务提交 
+- 主键进行顺序插入 ，和索引有关
+- 大量数据用load指令
+
+```mysql
+create index idx user age pho ad on tb user(age asc  phone desc); 建立索引的时候可以指定索引的升序或者降序
+```
+
+## 深度分页优化
+
+使用主键索引+子查询
+
+```mysql
+select * from tb sku t . (select id from tb sku order by id limit 2000000.10) a where t.id = a.id
+先通过主键索引查找分页的主键id(因为主键是顺序的)，然后再去通过主键查出数据
+```
+
+## update
+
+记得加索引，因为没有索引的时候是加的表锁
+
+## explain
+
+分析查询执行计划
+
+### id列表示同一张表中的执行顺序、id越大越先执行
+
+![image-20231215124330842](mdPic/MySql高级/image-20231215124330842.png)
+
+### select_type 查询的类型
+
+| 序号 | select_type 类型 | 含义 |
+| ---- | ---------------- | :--- |
+|1	|SIMPLE	|简单的 select 查询,查询中不包含子查询或者UNION|
+|2	|PRIMARY	|查询中若包含任何复杂的子部分，最外层查询则被标记为Primary|
+|3	|SUBQUERY	|在SELECT或WHERE列表中包含了子查询|
+|4	|DERIVED	|在FROM列表中包含的子查询被标记为DERIVED(衍生);MySQL会递归执行这些子查询, 把结果放在临时表里。|
+|5	|UNION	|若第二个SELECT出现在UNION之后，则被标记为UNION；若UNION包含在FROM子句的子查询中,外层SELECT将被标记为：DERIVED|
+|6	|UNION RESULT	|从UNION表获取结果的SELECT|
+|7	|DEPENDENT SUBQUERY	|在SELECT或WHERE列表中包含了子查询,子查询基于外层|
+|8	|UNCACHEABLE SUBQUREY	|无法被缓存的子查询|
+
+### type列表示查询所使用的类型
+
+system 最高级别
+
+- **const** 基于**主键或者唯一索引**查看一行的时候，mysql对查询某部分进行优化转换为一个常量
+- eq_ref  基于主键或者唯一索引 连接两个表查询 查询到条件每个索引都对应的只有一行的数据
+- **ref** 使用**非唯一索引**作为条件
+- 进行查询，每个索引对应的 有多个查询记录
+- **range** 使用索引对表进行**范围查找**
+- **index** 一般是进行全表扫描,能通过**全表扫描就能拿到结果**，不需要回表,一般是二级索引能够覆盖索引的情况
+- **all** **遍历聚簇索引树** 进行了查找
+- **null** 优化过程当中分解语句就可以获取到结果，执行的时候不用访问表或者索引  如：explain select *min*(user.age) from user;
+
+### possible_key 与 key 列 ，分表表示可能用到与实际用到的索引
+
+
+
+### key_len表示索引的最大长度，通常在联合索引的时候可以看出区别来，查看是否联合索引是否全部用到
+
+计算规则：
+
+![image-20231215134320316](mdPic/MySql高级/image-20231215134320316.png)
+
+### ref列表示的是等值匹配的类型
+
+const 是常量
+
+字段名
+
+func表示是与函数的结果
+
+### rows 表示 全表扫描的时候预估要扫描的行数， 索引扫描时表示扫描索引的夯实
+
+### filter表示扫描的结果命中率
+
+### Extra 列 表示sql查询的时候的一些额外的信息
+
+- using index 表示二级索引就可以直接得到结果不需要回表
+- using where 不通过索引来查询信息 
+- using index conditiong 使用二级索引 范围查找，并且需要回表查找数据
+- using temporary 需要引入临时表来进行操作
+- using filesort  排序的时候无法借助索引的时候  排序过多的时候要通过建立索引来优化
