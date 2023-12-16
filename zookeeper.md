@@ -23,3 +23,9 @@ zookeeper集群当中是不会出现脑裂问题的，因为zookeeper使用过�
    会导致一个机房会有leader,但是另外一个机房由于节点数小于集群数的一半，所以不能对外提供服务
 
 ![image-20231208132700709](mdPic/zookeeper/image-20231208132700709.png)
+
+```sh
+deleteall + 路径 删除所有节点
+[zk: 127.0.0.1:2181(CONNECTED) 4] deleteall /governance
+```
+
