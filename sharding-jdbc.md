@@ -183,3 +183,33 @@ rules:
     </dependencies>
 ```
 
+## springboot 配置
+
+```properties
+# 配置 DataSource Driver
+spring.datasource.driver-class-name=org.apache.shardingsphere.driver.ShardingSphereDriver
+## 指定 YAML 配置文件
+spring.datasource.url=jdbc:shardingsphere:classpath:sharding-jdbc-level.yaml
+```
+
+## MYBATIS
+
+在MyBatis中，如果你的关联查询的`select`方法需要多个参数，你可以通过`java.util.Map`来传递参数。你需要在`<association>`标签的`column`属性中指定一个`Map`，这个`Map`的键是参数名，值是参数值。
+
+首先，你需要修改你的`select`方法，使其接受一个`Map`参数：
+
+```xml
+<select id="selectByIdAndDate" parameterType="map" resultType="com.lxl.business.domain.DailyTrain">
+    select *
+    from `daily_train`
+    where `id` = #{id} and `date` = #{date}
+</select>
+```
+
+然后，你需要在`<association>`标签中指定一个`Map`，并设置`select`属性为新的`select`方法：
+
+```xml
+<association property="dailyTrain" column="{id=daily_train_id, date=start_date}" select="com.lxl.business.mapper.DailyTrainMapper.selectByIdAndDate"/>
+```
+
+这样，当你查询`DailyTrainTicket`时，MyBatis就会根据`daily_train_id`和`start_date`去查询对应的`DailyTrain`，并设置到`DailyTrainTicket`的`dailyTrain`属性中。
