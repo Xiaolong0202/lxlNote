@@ -238,6 +238,102 @@ protected final boolean tryRelease(int releases) {
 
 ![image-20231218123549038](mdPic/JUC/image-20231218123549038.png)
 
+## Condition实现原理
+
+使用：机制与objcet.wait 差不多
+
+- 必须要获取锁的线程才能使用wait方法,调用wait方法会直接释放当前的锁
+- 等待别的线程的signal
+- 被signal的时候不会立即开始运行，他还需要等使用signal的线程释放锁，并且本线程抢到锁才能够继续运行
+
+```java
+//newCondition返回了一个ConditionObject方法
+final ConditionObject newCondition() {
+            return new ConditionObject();
+ }
+
+//该类中维护了一个单向链表，Node是AQS中的NODE，并且是使用的NODE中的nextWaiter字段构成的链表
+public class ConditionObject implements Condition, java.io.Serializable {
+        private static final long serialVersionUID = 1173984872572414699L;
+        /** First node of condition queue. */
+        private transient Node firstWaiter;
+        /** Last node of condition queue. */
+        private transient Node lastWaiter;
+
+        /**
+         * Creates a new {@code ConditionObject} instance.
+         */
+        public ConditionObject() { }
+
+```
+
+## await方法
+
+```java
+public final void await() throws InterruptedException {
+            if (Thread.interrupted())
+                throw new InterruptedException();
+            Node node = addConditionWaiter();//创建一个当前线程的新的结点,并放入condition中的队列当中
+            long savedState = fullyRelease(node); //记录一下当前线程的state值,唤醒之后需要恢复
+            int interruptMode = 0;
+            while (!isOnSyncQueue(node)) { //不在同步队列里面
+                LockSupport.park(this);//就将其挂起
+                if ((interruptMode = checkInterruptWhileWaiting(node)) != 0)
+                    break;
+            }
+    //现成被唤醒了，这个时候结点也在同步队列中了，做后序处理，恢复状态,接下来就通过acquireQueued方法抢锁
+            if (acquireQueued(node, savedState) && interruptMode != THROW_IE)
+                interruptMode = REINTERRUPT;
+            if (node.nextWaiter != null) // clean up if cancelled
+                unlinkCancelledWaiters();
+            if (interruptMode != 0)
+                reportInterruptAfterWait(interruptMode);
+        }
+```
+
+## signal方法
+
+- 将condition中的等待队列中的节点挪出，并放入AQS的同步队列当中
+
+```java
+	public final void signal() {
+            if (!isHeldExclusively())//判断当前结点有没有获得锁
+                throw new IllegalMonitorStateException();
+            Node first = firstWaiter;//获得第一个结点
+            if (first != null)
+                doSignal(first);
+        }
+//不断从第一个结点开始查找可以被signal的结点,被signal成功就退出循环,
+private void doSignal(Node first) {
+            do {
+                if ( (firstWaiter = first.nextWaiter) == null)
+                    lastWaiter = null;
+                first.nextWaiter = null;
+           } while (!transferForSignal(first) && 
+                     (first = firstWaiter) != null);
+        }
+
+final boolean transferForSignal(Node node) {
+        /*
+         * 如果状态设置失败了，就返回false
+         */
+        if (!compareAndSetWaitStatus(node, Node.CONDITION, 0))
+            return false;
+	//将当前结点放入AQS中的同步队列
+    	  Node p = enq(node);
+        int ws = p.waitStatus;
+        if (ws > 0 || !compareAndSetWaitStatus(p, ws, Node.SIGNAL))
+            LockSupport.unpark(node.thread);//释放当前结点的线程，在await方法当中被阻塞的线程就可以继续运行了
+        return true;
+    
+```
+
+
+
+
+
+
+
 ## 公平锁不一定公平
 
 在队列初始化的时候，别的线程进来了，进行了误判，误以为head = tail 没有其他线程就直接进行抢锁
