@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xmlns:context="http://www.springframework.org/schema/context"
+       xmlns:aop="http://www.springframework.org/schema/aop"
+       xsi:schemaLocation="
+       http://www.springframework.org/schema/beans
+       http://www.springframework.org/schema/beans/spring-beans.xsd
+       http://www.springframework.org/schema/context
+       http://www.springframework.org/schema/context/spring-context.xsd
+       http://www.springframework.org/schema/aop
+       http://www.springframework.org/schema/aop/spring-aop.xsd
+       ">
+
+    <!--配置目标类-->
+    <bean id="userService" class="com.itheima.service.impl.UserServiceImpl"></bean>
+    <!--配置的通知类-->
+    <bean id="myAdvice3" class="com.itheima.advice.MyAdvice3"></bean>
+
+    <!--aop配置-->
+    <aop:config>
+        <aop:pointcut id="myPointcut2" expression="execution(* com.itheima.service.impl.*.*(..))"/>
+        <aop:advisor advice-ref="myAdvice3" pointcut-ref="myPointcut2"/>
+    </aop:config>
+
+
+</beans>
