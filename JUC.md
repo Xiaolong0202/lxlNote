@@ -10,7 +10,7 @@ JMM的一种原则，程序员只要遵循着这个原则就能保证变量的�
 
 ​      释放锁的那个线程对变量做的修改，后续获得锁的那个线程一定能够看到前一个线程做的修改
 
-- volatile关键字机制
+- **volatile**关键字机制
 
   被volatile关键字修饰的变量，只要被修改就能被看到
 
@@ -21,6 +21,16 @@ JMM的一种原则，程序员只要遵循着这个原则就能保证变量的�
 - 传递性
 
 - join原则
+
+## Volatile重排序的规则：
+
+​	写volatile关键字**之前**的代码都不能进行重排序,因为另外一个线程需要对这个线程操作volatile之前的操作可见
+
+​	读volatile关键字修饰变量**之后**的代码都不能重排序，后续的操作需要可见
+
+## 32位机器上long 与 double的原子性问题
+
+ 在32位虚拟机上由于long 与 double 是 8个字节的，并且是64位的，在其写的时候只能32位的写, 赋值的时候先赋值高32位在赋值低32位，必须要在long与double变量加上volatile关键字才能保证原子性,jdk5之后读操作是原子性操作
 
 ## AQS结点
 
@@ -123,14 +133,30 @@ protected boolean isHeldExclusively() {
     }
 ```
 
-## ReentrantLock通过自旋锁入队
+## AQS 通过自旋锁入队
 
 ```java
+private Node addWaiter(Node mode) {
+        Node node = new Node(Thread.currentThread(), mode);
+        // Try the fast path of enq; backup to full enq on failure
+    //先尝试快速的插入队列的尾部
+        Node pred = tail;
+        if (pred != null) {
+            node.prev = pred;
+            if (compareAndSetTail(pred, node)) {
+                pred.next = node;
+                return node;
+            }
+        }
+    //如果失败的话进入enq方法，也就是通过自旋+CAS入队
+        enq(node);
+        return node;
+    }
 private Node enq(final Node node) {
     for (;;) {
         Node t = tail;
         if (t == null) { // Must initialize
-            if (compareAndSetHead(new Node()))
+            if (compareAndSetHead(new Node()))//如果tail 为空就进行初始化
                 tail = head;
         } else {
             node.prev = t;
@@ -143,10 +169,11 @@ private Node enq(final Node node) {
 }
 ```
 
-## ReentrantLock抢占锁 unfair 实现
+## ReentrantLock 中的内部类Sync的 抢占锁 unfair 实现 
 
 ```java
-public final void acquire(int arg) {  //  AQS
+//  AQS 的方法
+public final void acquire(int arg) {  
         if (!tryAcquire(arg) && //先枪锁  抢到就直接退出  tryAcquire部分需要被重写
             acquireQueued(addWaiter(Node.EXCLUSIVE), arg)) //将addWaiter入队,通过自旋+CAS的操作入队  入队之后自旋，直到 当前加入队列的结点为头结点  就创建中断，表示抢到锁了
             selfInterrupt();
@@ -154,6 +181,7 @@ public final void acquire(int arg) {  //  AQS
 ```
 
 ```java
+//  AQS 的方法
 final boolean acquireQueued(final Node node, int arg) {
         boolean failed = true;
         try {
@@ -161,7 +189,7 @@ final boolean acquireQueued(final Node node, int arg) {
             for (;;) { //如果是头结点就会一直自旋，如果不是的话，就会将前面的结点设置为SIGNAL并进入休眠
                 final Node p = node.predecessor();
                 if (p == head && tryAcquire(arg)) { //如果前驱节点是头结点就尝试tryACquire获取锁，如果获取成功就退出自旋,AQS中的head节点是一个虚节点，不存储线程的信息  
-                    setHead(node);  //抢到锁了就将自己设置为头结点
+                    setHead(node);  //抢到锁了就将前驱结点设置为头结点
                     p.next = null; // help GC
                     failed = false;
                     return interrupted;
@@ -204,9 +232,10 @@ protected final boolean tryAcquire(int acquires) {
 
 先tryAcquire抢锁，抢锁
 
-## ReentrantLock  AQS释放锁release
+## ReentrantLock 释放锁release
 
 ```java
+// AQS的方法
 public final boolean release(int arg) {
         if (tryRelease(arg)) { //尝试释放锁  实现部分由子类实现 模版方法
             Node h = head;   
@@ -215,6 +244,27 @@ public final boolean release(int arg) {
             return true;
         }
         return false;
+    }
+ private void unparkSuccessor(Node node) {
+        /*
+         * 将当期节点的状态改为0 
+         */
+        int ws = node.waitStatus;
+        if (ws < 0)
+            compareAndSetWaitStatus(node, ws, 0);
+
+        /*
+         * 唤醒下一个结点
+         */
+        Node s = node.next;
+        if (s == null || s.waitStatus > 0) {
+            s = null;
+            for (Node t = tail; t != null && t != node; t = t.prev)
+                if (t.waitStatus <= 0)
+                    s = t;
+        }
+        if (s != null)
+            LockSupport.unpark(s.thread);
     }
 ```
 
@@ -242,7 +292,7 @@ protected final boolean tryRelease(int releases) {
 
 使用：机制与objcet.wait 差不多
 
-- 必须要获取锁的线程才能使用wait方法,调用wait方法会直接释放当前的锁
+- 必须要获取锁的线程才能使用await方法,调用await方法会直接释放当前的锁
 - 等待别的线程的signal
 - 被signal的时候不会立即开始运行，他还需要等使用signal的线程释放锁，并且本线程抢到锁才能够继续运行
 
@@ -274,7 +324,7 @@ public final void await() throws InterruptedException {
             if (Thread.interrupted())
                 throw new InterruptedException();
             Node node = addConditionWaiter();//创建一个当前线程的新的结点,并放入condition中的队列当中
-            long savedState = fullyRelease(node); //记录一下当前线程的state值,唤醒之后需要恢复
+            long savedState = fullyRelease(node); //记录一下当前线程的state值,唤醒之后需要恢复,将当前的线程的锁释放
             int interruptMode = 0;
             while (!isOnSyncQueue(node)) { //不在同步队列里面
                 LockSupport.park(this);//就将其挂起
@@ -289,6 +339,38 @@ public final void await() throws InterruptedException {
             if (interruptMode != 0)
                 reportInterruptAfterWait(interruptMode);
         }
+//将当前线程创建一个结点并放入条件队列当中
+  private Node addConditionWaiter() {
+            Node t = lastWaiter;
+            // If lastWaiter is cancelled, clean out.
+            if (t != null && t.waitStatus != Node.CONDITION) {
+                unlinkCancelledWaiters();
+                t = lastWaiter;
+            }
+            Node node = new Node(Thread.currentThread(), Node.CONDITION);
+            if (t == null)
+                firstWaiter = node;
+            else
+                t.nextWaiter = node;
+            lastWaiter = node;
+            return node;
+        }
+//将当前活跃线程的锁释放,并返回当前的state
+  final int fullyRelease(Node node) {
+        boolean failed = true;
+        try {
+            int savedState = getState();
+            if (release(savedState)) {
+                failed = false;
+                return savedState;
+            } else {
+                throw new IllegalMonitorStateException();
+            }
+        } finally {
+            if (failed)
+                node.waitStatus = Node.CANCELLED;
+        }
+    }
 ```
 
 ## signal方法
@@ -559,9 +641,9 @@ final void runWorker(Worker w) {
             }
 
             try {
-                Runnable r = timed ? 
-                    workQueue.poll(keepAliveTime, TimeUnit.NANOSECONDS) : //不允许超时就会阻塞直到keepAliveTime
-                    workQueue.take();//允许超时，则允许一直无限的阻塞值得有新的任务,能够被取出
+                Runnable r = timed ? //(allowCoreThreadTimeOut || wc > corePoolSize;)
+                    workQueue.poll(keepAliveTime, TimeUnit.NANOSECONDS) : //不允许超时就会阻塞直到keepAliveTime,workcCount > core 表明是非核心线程所以就在 KeepAlive 之后如果还没有取到task 就返回null
+                    workQueue.take();//允许超时，则允许一直无限的阻塞值得有新的任务,能够被取出 如果当前活动线程数小于core 则表明当前线程是核心线程，所以就一直阻塞，保持当前线程一直存活
                 if (r != null)
                     return r;
                 timedOut = true;
@@ -604,7 +686,7 @@ ObjectWaiter首先会进入 Entry Set等着，当线程获取到对象的`monito
 
 轻量级锁的目标是，在无竞争情况下，减少重量级锁产生的性能消耗（并不是为了代替重量级锁，实际上就是赌一手同一时间只有一个线程在占用资源），包括系统调用引起的内核态与用户态切换、线程阻塞造成的线程切换等。它不像是重量级锁那样，需要向操作系统申请互斥量。它的运作机制如下：
 
-在即将开始执行同步代码块中的内容时，会首先检查对象的Mark Word，查看锁对象是否被其他线程占用，如果没有任何线程占用，那么会在当前线程中所处的栈帧中建立一个名为锁记录（Lock Record）的空间，用于复制并存储对象目前的Mark Word信息（官方称为Displaced Mark Word）。
+在即将开始执行同步代码块中的内容时，会首先检查对象的Mark Word，查看锁对象是否被其他线程占用，如果没有任何线程占用，那么会在当前线程中所处的(Interpretered Frame)解释帧 栈帧中建立一个名为锁记录（Lock Record）的空间，用于复制并存储对象目前的Mark Word信息（官方称为Displaced Mark Word）。
 
 接着，虚拟机将使用CAS操作将对象的Mark Word更新为轻量级锁状态（数据结构变为指向Lock Record的指针，指向的是当前的栈帧）
 

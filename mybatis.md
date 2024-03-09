@@ -32,12 +32,36 @@ public SqlSessionFactory build(InputStream inputStream, String environment, Prop
       }
     }
   }
+
+
 ```
 
 ```java
-//原来的sql被解析,替换占位符并且 解析动态sql ，sqlSource分为动态与静态sqlSource  
-SqlSource sqlSource = langDriver.createSqlSource(configuration, context, parameterTypeClass);
+
 ```
+
+## 通过 XMLMapperBuilder解析Mapper.xml文件,XMLStatementBuilder构建语句
+
+```java
+public void parseStatementNode() {
+
+    String keyStatementId = id + SelectKeyGenerator.SELECT_KEY_SUFFIX;//获取StatementId
+    keyStatementId = builderAssistant.applyCurrentNamespace(keyStatementId, true);
+  
+	//原来的sql被解析,替换占位符并且 解析动态sql ，sqlSource分为动态与静态sqlSource ,SqlSource,getBoundSql获取BoundSql,静态BooundSql当中有
+     //private final String sql;
+  	 // private final List<ParameterMapping> parameterMappings; 
+    SqlSource sqlSource = langDriver.createSqlSource(configuration, context, parameterTypeClass);
+   //解析各种参数……
+	//创建MappedStatement对象,并放入Configuration中的  protected final Map<String, MappedStatement> mappedStatements当中
+    builderAssistant.addMappedStatement(id, sqlSource, statementType, sqlCommandType,
+        fetchSize, timeout, parameterMap, parameterTypeClass, resultMap, resultTypeClass,
+        resultSetTypeEnum, flushCache, useCache, resultOrdered,
+        keyGenerator, keyProperty, keyColumn, databaseId, langDriver, resultSets);
+  }
+```
+
+
 
 ## 通过XmlScriptBuilder解析获得SqlSource
 
@@ -120,6 +144,7 @@ private void initNodeHandlerMap() {
       // 1.执行器类型,2.事务隔离级别 3.是否自动提交事务  ,默认的执行器类型是Simple
     return openSessionFromDataSource(configuration.getDefaultExecutorType(), null, false);
   }
+
 ```
 
 ## Executor:
@@ -135,7 +160,7 @@ private SqlSession openSessionFromDataSource(ExecutorType execType, TransactionI
       final TransactionFactory transactionFactory = getTransactionFactoryFromEnvironment(environment);
         //获取事务对象其中,JdbcTransaction实现是通过connection来实现事务，而ManagedTransaction实现是将事务操作交给容器来处理，自己不做处理
       tx = transactionFactory.newTransaction(environment.getDataSource(), level, autoCommit);
-        //创建执行器对象,通过执行器类型创建执行器，对象，并且如果允许缓存，则会使用CachingExecutor对BaseExecutor包装一层,进行装饰
+        //创建执行器对象,通过执行器类型创建执行器，对象，并且如果允许缓存，则会使用CachingExecutor(维护二级缓存)对BaseExecutor包装一层,进行装饰
       final Executor executor = configuration.newExecutor(tx, execType);
         //创建SqlSession对象并返回
       return new DefaultSqlSession(configuration, executor, autoCommit);
@@ -221,6 +246,7 @@ public <E> List<E> query(MappedStatement ms, Object parameterObject, RowBounds r
 ## BaseExecutor中的query方法
 
 ```java
+//BaseExcutor维护了一级缓存，具体的查询还是交给实现类去做
 public <E> List<E> query(MappedStatement ms, Object parameter, RowBounds rowBounds, ResultHandler resultHandler, CacheKey key, BoundSql boundSql) throws SQLException {
     ErrorContext.instance().resource(ms.getResource()).activity("executing a query").object(ms.getId());
     if (closed) {
@@ -295,6 +321,7 @@ public void parameterize(Statement statement) throws SQLException {
 ```
 
 ```java
+//通过boundSql获取所有的parameterMapping,并且遍历找到合适的TypeHandler实现类型处理器的转换，给preparedStatement进行赋值
 public void setParameters(PreparedStatement ps) {
     ErrorContext.instance().activity("setting parameters").object(mappedStatement.getParameterMap().getId());
     List<ParameterMapping> parameterMappings = boundSql.getParameterMappings();
@@ -471,9 +498,11 @@ public ResultSetHandler newResultSetHandler(Executor executor, MappedStatement m
 
 
 
-## 初始化阶段，会将 @Signature当中的签名当中解析一下放入SignatrueMap当中，并且在invoke方法中会判断签名的
+## 初始化阶段，会将 @Signature当中的签名当中信息解析一下放入SignatrueMap当中，并且在invoke方法中会判断签名的
 
 ```java
+  //@Signature(type = Executor.class, method = "update", args = {MappedStatement.class, Object.class}),
+  //@Signature(type = Executor.class, method = "query", args = {MappedStatement.class, Object.class, RowBounds.class, ResultHandler.class})})
 /**
 * Plugin方法中的invoke方法
 */
@@ -490,5 +519,112 @@ public ResultSetHandler newResultSetHandler(Executor executor, MappedStatement m
       throw ExceptionUtil.unwrapThrowable(e);
     }
   }
+```
+
+## Mybatis代理类原理
+
+**解析：**在配置文件当中，mappers,标签会标记mapper文件的地址,解析地址之后，会使用XMLMapperBuilder解析这个Mapper文件
+
+```java
+public void parse() {//XMLMapperBuilder
+    if (!configuration.isResourceLoaded(resource)) {
+      configurationElement(parser.evalNode("/mapper"));
+      configuration.addLoadedResource(resource);
+      bindMapperForNamespace();//该方法会试图将namespace当作Mapper接口类的全限定名去解析
+    }
+    parsePendingResultMaps();
+    parsePendingCacheRefs();
+    parsePendingStatements();
+  }
+private void bindMapperForNamespace() {
+    String namespace = builderAssistant.getCurrentNamespace();
+    if (namespace != null) {
+      Class<?> boundType = null;
+      try {
+        boundType = Resources.classForName(namespace);//将namespace当作接口Mapper的全限定名，加载对应的Class对象
+      } catch (ClassNotFoundException e) {
+        // ignore, bound type is not required
+      }
+      if (boundType != null && !configuration.hasMapper(boundType)) {
+        // Spring may not know the real resource name so we set a flag
+        // to prevent loading again this resource from the mapper interface
+        // look at MapperAnnotationBuilder#loadXmlResource
+        configuration.addLoadedResource("namespace:" + namespace);
+        configuration.addMapper(boundType);//调用addMapper，方法添加Mapper
+      }
+    }
+  }
+//Configuration当中的addMapper方法调用mapperRegistry
+public <T> void addMapper(Class<T> type) {
+    mapperRegistry.addMapper(type);
+  }
+//mapperRegistry ，为该Mapper接口创建一个MapperProxyFactory,放入缓存当中
+public <T> void addMapper(Class<T> type) {
+    if (type.isInterface()) {
+      if (hasMapper(type)) {
+        throw new BindingException("Type " + type + " is already known to the MapperRegistry.");
+      }
+      boolean loadCompleted = false;
+      try {
+        knownMappers.put(type, new MapperProxyFactory<>(type));
+        // It's important that the type is added before the parser is run
+        // otherwise the binding may automatically be attempted by the
+        // mapper parser. If the type is already known, it won't try.
+        MapperAnnotationBuilder parser = new MapperAnnotationBuilder(config, type);
+        parser.parse();
+        loadCompleted = true;
+      } finally {
+        if (!loadCompleted) {
+          knownMappers.remove(type);
+        }
+      }
+    }
+  }
+```
+
+**获取代理对象方法**
+
+```java
+//sqlSession.getMapper方法会调用MapperRegistry的getMapper方法 
+public <T> T getMapper(Class<T> type, SqlSession sqlSession) {
+    //获取到解析阶段的MapperProxyFactory
+    final MapperProxyFactory<T> mapperProxyFactory = (MapperProxyFactory<T>) knownMappers.get(type);
+    if (mapperProxyFactory == null) {
+      throw new BindingException("Type " + type + " is not known to the MapperRegistry.");
+    }
+    try {
+    	//通过工厂创建代理对象实例
+      return mapperProxyFactory.newInstance(sqlSession);
+    } catch (Exception e) {
+      throw new BindingException("Error getting mapper instance. Cause: " + e, e);
+    }
+  }
+
+protected T newInstance(MapperProxy<T> mapperProxy) {
+    return (T) Proxy.newProxyInstance(mapperInterface.getClassLoader(), new Class[] { mapperInterface }, mapperProxy);
+  }
+
+  public T newInstance(SqlSession sqlSession) {
+    final MapperProxy<T> mapperProxy = new MapperProxy<>(sqlSession, mapperInterface, methodCache);//是一个JDK  InvocationHandler的实现类
+    return newInstance(mapperProxy);
+  }
+//最终调用MapperProxy中的invoke方法，最终获取MapperMethod对象.调用MapperMethod中的execute方法，底层还是通过statementId调用sqlSession.selectList方法
+```
+
+## Spring是如何管理的
+
+MapperScan定义包扫描，被扫描的接口被定义成BeanDefination,并且会被包装成一个MapperFactoryBean类,而当需要注入，也就是获取Mapper的实现类的，时候会调用FactoryBean的getObject方法，这样，getObjcet方法中会调用sqlSession.getMapper方法返回代理对象
+
+![image-20240307204945826](mdPic/mybatis/image-20240307204945826.png)
+
+## 为什么Mybatis二级缓存是namespace的而一级缓存是会话级别的
+
+```java
+因为一级缓存中的localCache是在BaseExecutor当中的，并且这个Executor是在SqlSession中的，所以一级缓存会随着SqlSession会话的关闭而关闭
+而二级缓存CachingExecutor从mappedStatement中获取的，是一直存在的
+       //获取二级缓存,二级缓存是在mappedStatement当中的
+    Cache cache = ms.getCache();
+    if (cache != null) {
+      flushCacheIfRequired(ms);
 ```
 
